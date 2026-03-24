@@ -19,7 +19,7 @@ import { createRequire } from "module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import express from "express";
+import express, { Request, Response } from "express";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -32,7 +32,10 @@ import { registerCreativeTools } from "./tools/creatives.js";
 import { registerMediaTools } from "./tools/media.js";
 import { registerActivityTools } from "./tools/activities.js";
 import { registerPaginationTools } from "./tools/pagination.js";
+import { registerAudiencesTools } from "./tools/audiences.js";
 import { getAccessToken } from "./services/graph-api.js";
+import { z } from "zod";
+import { listCenarios } from "./cenarios.js";
 
 const server = new McpServer({
   name: "meta-ads-mcp-server",
@@ -48,6 +51,15 @@ registerCreativeTools(server);
 registerMediaTools(server);
 registerActivityTools(server);
 registerPaginationTools(server);
+registerAudiencesTools(server);
+
+server.registerTool('list_cenarios', {
+  description: 'Lista todos os cenários/clientes disponíveis com account_id.',
+  inputSchema: z.object({}),
+  annotations: { readOnlyHint: true }
+}, async () => ({
+  content: [{ type: 'text', text: JSON.stringify(listCenarios(), null, 2) }]
+}));
 
 async function runStdio(): Promise<void> {
   try {
@@ -82,7 +94,7 @@ async function runHTTP(): Promise<void> {
   const app = express();
   app.use(express.json());
 
-  app.post("/mcp", async (req, res) => {
+  app.post("/mcp", async (req: Request, res: Response) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -93,7 +105,7 @@ async function runHTTP(): Promise<void> {
   });
 
   // Health check endpoint
-  app.get("/health", (_req, res) => {
+  app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", server: "meta-ads-mcp-server", version });
   });
 

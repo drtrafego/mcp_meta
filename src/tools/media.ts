@@ -4,10 +4,15 @@ import { FB_GRAPH_URL } from "../constants.js";
 import {
   getAccessToken,
   makeGraphApiCall,
+  makeGraphApiPostCall,
   prepareParams,
   handleApiError,
+  getAccountId
 } from "../services/graph-api.js";
 import { PaginationSchema } from "../schemas/common.js";
+import { getCenario } from "../cenarios.js";
+import FormData from "form-data";
+import axios from "axios";
 
 export function registerMediaTools(server: McpServer): void {
   server.registerTool(
@@ -19,7 +24,7 @@ export function registerMediaTools(server: McpServer): void {
 Useful for auditing image assets, finding images by hash or name, and checking image dimensions and status.
 
 Args:
-  - act_id (string): Ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
   - fields (string[]): Fields to retrieve. Available: id, account_id, created_time, creatives, hash, height, is_associated_creatives_in_adgroups, name, original_height, original_width, permalink_url, status, updated_time, url, url_128, width
   - hashes (string[]): Filter by specific image hashes
   - name (string): Filter images by name (partial match)
@@ -38,9 +43,9 @@ Examples:
   - Use when: "Show images wider than 1000px"`,
       inputSchema: z
         .object({
-          act_id: z
+          cenario_id: z
             .string()
-            .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
           fields: z
             .array(z.string())
             .optional()
@@ -76,8 +81,9 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ act_id, fields, hashes, name, minwidth, minheight, limit, after, before }) => {
+    async ({ cenario_id, fields, hashes, name, minwidth, minheight, limit, after, before }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
         const url = `${FB_GRAPH_URL}/${act_id}/adimages`;
 
@@ -192,4 +198,133 @@ Examples:
       }
     }
   );
+
+  server.registerTool("meta_ads_upload_ad_image", {
+    description: "Upload an ad image from a public URL to the ad account.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      url: z.string().url().describe("Public URL of the image to upload"),
+      name: z.string().optional().describe("Optional name for the image in the ad account")
+    })
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      
+      const imageResponse = await axios.get(params.url, { responseType: 'arraybuffer' });
+      const buffer = Buffer.from(imageResponse.data, 'binary');
+      
+      const form = new FormData();
+      form.append('access_token', token);
+      if (params.name) form.append('name', params.name);
+      
+      const filename = params.name ? `${params.name}.jpg` : 'uploaded_image.jpg';
+      form.append('bytes', buffer, { filename });
+
+      const res = await axios.post(`${FB_GRAPH_URL}/${actId}/adimages`, form, {
+        headers: form.getHeaders(),
+      });
+      return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+    } catch (err: any) {
+      if (err.response?.data) {
+        return { content: [{ type: "text", text: `API Error: ${JSON.stringify(err.response.data)}` }] };
+      }
+      return { content: [{ type: "text", text: err.message }] };
+    }
+  });
+
+  server.registerTool("meta_ads_upload_ad_video", {
+    description: "Upload an ad video from a public URL. Can handle large files directly via Meta backend download.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      file_url: z.string().url().describe("Public URL of the video to upload"),
+      title: z.string().optional(),
+      description: z.string().optional()
+    })
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      const payload: Record<string, any> = {
+        access_token: token,
+        file_url: params.file_url
+      };
+      if (params.title) payload.title = params.title;
+      if (params.description) payload.description = params.description;
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/advideos`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_bulk_upload_ad_images", {
+    description: "Upload multiple ad images via public URLs.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      images: z.array(z.object({
+        url: z.string().url(),
+        name: z.string().optional()
+      }))
+    })
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      const results: any[] = [];
+      
+      for (const image of params.images) {
+        try {
+          const imageResponse = await axios.get(image.url, { responseType: 'arraybuffer' });
+          const buffer = Buffer.from(imageResponse.data, 'binary');
+          const form = new FormData();
+          form.append('access_token', token);
+          if (image.name) form.append('name', image.name);
+          form.append('bytes', buffer, { filename: image.name ? image.name + '.jpg' : 'uploaded.jpg' });
+
+          const res = await axios.post(`${FB_GRAPH_URL}/${actId}/adimages`, form, { headers: form.getHeaders() });
+          results.push({ url: image.url, status: "success", data: res.data });
+        } catch (e: any) {
+          results.push({ url: image.url, status: "error", error: e?.response?.data || e.message });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: err.message }] };
+    }
+  });
+
+  server.registerTool("meta_ads_bulk_upload_ad_videos", {
+    description: "Upload multiple ad videos via public URLs.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      videos: z.array(z.object({
+        file_url: z.string().url(),
+        title: z.string().optional(),
+        description: z.string().optional()
+      }))
+    })
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      const results: any[] = [];
+      
+      for (const video of params.videos) {
+        try {
+          const payload: Record<string, any> = { access_token: token, file_url: video.file_url };
+          if (video.title) payload.title = video.title;
+          if (video.description) payload.description = video.description;
+          const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/advideos`, payload);
+          results.push({ url: video.file_url, status: "success", data });
+        } catch (e: any) {
+          results.push({ url: video.file_url, status: "error", error: e?.response?.data || e.message });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: err.message }] };
+    }
+  });
 }

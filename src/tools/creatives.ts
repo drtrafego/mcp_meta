@@ -4,10 +4,14 @@ import { FB_GRAPH_URL } from "../constants.js";
 import {
   getAccessToken,
   makeGraphApiCall,
+  makeGraphApiPostCall,
+  fetchNode,
   prepareParams,
   handleApiError,
+  getAccountId
 } from "../services/graph-api.js";
 import { FieldsSchema, FilteringSchema, PaginationSchema, DateFormatSchema, EffectiveStatusSchema } from "../schemas/common.js";
+import { getCenario } from "../cenarios.js";
 
 const CREATIVE_FIELDS_DESC =
   "Fields to retrieve. Available: id, name, account_id, actor_id, adlabels, asset_feed_spec, authorization_category, body, call_to_action_type, effective_authorization_category, effective_instagram_media_id, effective_object_story_id, image_hash, image_url, instagram_permalink_url, instagram_story_id, instagram_user_id, link_url, object_id, object_story_id, object_story_spec, object_type, object_url, platform_customizations, product_set_id, status, template_url, thumbnail_url, title, url_tags, use_page_actor_override, video_id";
@@ -22,7 +26,7 @@ export function registerCreativeTools(server: McpServer): void {
 Useful for auditing all creative assets, finding creatives by status, or reviewing creative content across the account.
 
 Args:
-  - act_id (string): Ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
   - fields (string[]): ${CREATIVE_FIELDS_DESC}
   - effective_status (string[]): Filter by status: ACTIVE, DELETED, IN_PROCESS, WITH_ISSUES
   - filtering (object[]): Additional filter objects with field, operator, value
@@ -37,9 +41,9 @@ Examples:
   - Use when: "Show all creatives with issues in act_123456"`,
       inputSchema: z
         .object({
-          act_id: z
+          cenario_id: z
             .string()
-            .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
           fields: FieldsSchema.describe(CREATIVE_FIELDS_DESC),
           effective_status: z
             .array(z.enum(["ACTIVE", "DELETED", "IN_PROCESS", "WITH_ISSUES"]))
@@ -55,8 +59,9 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ act_id, fields, effective_status, filtering, limit, after, before }) => {
+    async ({ cenario_id, fields, effective_status, filtering, limit, after, before }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
         const url = `${FB_GRAPH_URL}/${act_id}/adcreatives`;
         const params = prepareParams(
@@ -193,4 +198,182 @@ Examples:
       }
     }
   );
+
+  server.registerTool("meta_ads_create_ad_creative", {
+    description: "Create a single image or video ad creative.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      name: z.string(),
+      title: z.string().optional().describe("Headline"),
+      body: z.string().optional().describe("Primary text"),
+      description: z.string().optional().describe("Description for link_data"),
+      image_hash: z.string().optional(),
+      video_id: z.string().optional(),
+      thumbnail_url: z.string().optional(),
+      call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "SEND_MESSAGE", "APPLY_NOW", "BOOK_TRAVEL"]).default("LEARN_MORE"),
+      link_url: z.string().optional()
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const cenario = getCenario(params.cenario_id);
+      const actId = cenario.account_id;
+      const pageId = cenario.page_id;
+      const igId = cenario.instagram_user_id;
+
+      const token = getAccessToken();
+      const payload: Record<string, any> = {
+        access_token: token,
+        name: params.name,
+      };
+
+      if (params.video_id) {
+        payload.object_story_spec = {
+          page_id: pageId,
+          instagram_user_id: igId,
+          video_data: {
+            video_id: params.video_id,
+            message: params.body,
+            title: params.title,
+            call_to_action: {
+              type: params.call_to_action_type || 'LEARN_MORE',
+              value: { link: params.link_url }
+            }
+          }
+        };
+        if (params.thumbnail_url) payload.object_story_spec.video_data.image_url = params.thumbnail_url;
+      } else if (params.image_hash) {
+        payload.object_story_spec = {
+          page_id: pageId,
+          instagram_user_id: igId,
+          link_data: {
+            image_hash: params.image_hash,
+            message: params.body,
+            name: params.title,
+            description: params.description,
+            link: params.link_url,
+            call_to_action: {
+              type: params.call_to_action_type || 'LEARN_MORE',
+              value: { link: params.link_url }
+            }
+          }
+        };
+      } else {
+        throw new Error("You must provide either image_hash or video_id.");
+      }
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/adcreatives`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_create_carousel_ad_creative", {
+    description: "Create a carousel ad creative. NEVER pass instagram_actor_id in carousels.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      name: z.string(),
+      body: z.string().optional().describe("Primary text appearing above carousel"),
+      link_url: z.string().describe("Fallback link URL for the carousel"),
+      cards: z.array(z.object({
+        name: z.string().optional().describe("Headline for the card"),
+        description: z.string().optional(),
+        image_hash: z.string().optional(),
+        video_id: z.string().optional(),
+        link: z.string().optional(),
+        call_to_action_type: z.string().default("LEARN_MORE")
+      }))
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const cenario = getCenario(params.cenario_id);
+      const actId = cenario.account_id;
+      const pageId = cenario.page_id;
+      // CRITICAL RULE: Never pass instagram_actor_id in carousel!
+      
+      const token = getAccessToken();
+      const payload: Record<string, any> = {
+        access_token: token,
+        name: params.name,
+      };
+
+      const childAttachments = params.cards.map((card) => {
+        const att: any = {
+          name: card.name,
+          description: card.description,
+          link: card.link || params.link_url,
+          call_to_action: {
+            type: card.call_to_action_type,
+            value: { link: card.link || params.link_url }
+          }
+        };
+        if (card.image_hash) att.image_hash = card.image_hash;
+        if (card.video_id) att.video_id = card.video_id;
+        return att;
+      });
+
+      const objectStorySpec: any = {
+        page_id: pageId,
+        link_data: {
+          child_attachments: childAttachments,
+          message: params.body,
+          link: params.link_url,
+          caption: params.link_url
+        }
+      };
+
+      payload.object_story_spec = JSON.stringify(objectStorySpec);
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/adcreatives`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_bulk_get_ad_creatives", {
+    description: "Fetch multiple creatives by their IDs.",
+    inputSchema: z.object({
+      creative_ids: z.array(z.string()),
+      fields: FieldsSchema.describe(CREATIVE_FIELDS_DESC)
+    })
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const url = `${FB_GRAPH_URL}/`;
+      const queryParams = prepareParams(
+        { access_token: token, ids: params.creative_ids.join(",") },
+        { fields: params.fields }
+      );
+      const data = await makeGraphApiCall(url, queryParams);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_update_ad_creative", {
+    description: "Update an ad creative (usually limited to name). Note: Usually you can't edit images/videos in existing creatives, you must recreate them.",
+    inputSchema: z.object({
+      creative_id: z.string(),
+      name: z.string()
+    })
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const payload: Record<string, any> = { access_token: token, name: params.name };
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${params.creative_id}`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
 }

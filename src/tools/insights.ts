@@ -8,6 +8,7 @@ import {
   handleApiError,
 } from "../services/graph-api.js";
 import { InsightsInputSchema } from "../schemas/insights.js";
+import { getCenario } from "../cenarios.js";
 
 const INSIGHTS_DESCRIPTION_SUFFIX = `
 
@@ -38,7 +39,7 @@ export function registerInsightsTools(server: McpServer): void {
 Fetches metrics like impressions, reach, clicks, spend, conversions, and more for an entire ad account. Supports time range definitions, demographic breakdowns, and attribution settings.
 
 Args:
-  - act_id (string): Ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
   - fields (string[]): Metrics to retrieve. Common: impressions, reach, clicks, spend, ctr, cpc, cpm, cpp, frequency, actions, conversions, cost_per_action_type
   - date_preset (string): Relative time range preset (default: last_30d)
   - time_range (object): Custom range {'since':'YYYY-MM-DD','until':'YYYY-MM-DD'}
@@ -46,9 +47,9 @@ Args:
   - breakdowns (string[]): Segment by: age, gender, country, impression_device, publisher_platform, etc.
   - See full parameter list in inputSchema${INSIGHTS_DESCRIPTION_SUFFIX}`,
       inputSchema: InsightsInputSchema.extend({
-        act_id: z
+        cenario_id: z
           .string()
-          .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+          .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
       }),
       annotations: {
         readOnlyHint: true,
@@ -57,8 +58,9 @@ Args:
         openWorldHint: true,
       },
     },
-    async ({ act_id, ...insightParams }) => {
+    async ({ cenario_id, ...insightParams }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
         const url = `${FB_GRAPH_URL}/${act_id}/insights`;
         const params = buildInsightsParams({ access_token: token }, {
@@ -195,6 +197,85 @@ Args:
         return buildInsightsResult(data);
       } catch (error) {
         return { content: [{ type: "text", text: handleApiError(error) }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    "meta_ads_bulk_get_insights",
+    {
+      title: "Bulk Get Meta Ads Insights",
+      description: "Fetch insights for multiple specific objects (campaigns, ad sets, or ads) sequentially.",
+      inputSchema: InsightsInputSchema.extend({
+        object_ids: z.array(z.string()).describe("List of IDs to fetch insights for")
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ object_ids, ...insightParams }) => {
+      try {
+        const token = getAccessToken();
+        const results: any[] = [];
+        const params = buildInsightsParams({ access_token: token }, {
+          ...insightParams,
+          level: insightParams.level ?? "ad",
+        });
+        
+        for (const id of object_ids) {
+          try {
+            const url = `${FB_GRAPH_URL}/${id}/insights`;
+            const data = await makeGraphApiCall(url, params);
+            results.push({ id, status: "success", data });
+          } catch (e: any) {
+            results.push({ id, status: "error", error: e?.response?.data || e.message });
+          }
+        }
+        return buildInsightsResult(results);
+      } catch (error) {
+         return { content: [{ type: "text", text: handleApiError(error) }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    "meta_ads_compare_campaign_performance",
+    {
+      title: "Compare Campaign Performance",
+      description: "Fetch and compare insights for two specific campaigns.",
+      inputSchema: InsightsInputSchema.extend({
+        campaign_id_a: z.string(),
+        campaign_id_b: z.string()
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ campaign_id_a, campaign_id_b, ...insightParams }) => {
+      try {
+        const token = getAccessToken();
+        const params = buildInsightsParams({ access_token: token }, {
+          ...insightParams,
+          level: insightParams.level ?? "campaign",
+        });
+        
+        const [dataA, dataB] = await Promise.all([
+          makeGraphApiCall(`${FB_GRAPH_URL}/${campaign_id_a}/insights`, params).catch(e => ({ error: e?.response?.data || e.message })),
+          makeGraphApiCall(`${FB_GRAPH_URL}/${campaign_id_b}/insights`, params).catch(e => ({ error: e?.response?.data || e.message }))
+        ]);
+
+        return buildInsightsResult({
+          campaign_a: { id: campaign_id_a, data: dataA },
+          campaign_b: { id: campaign_id_b, data: dataB }
+        });
+      } catch (error) {
+         return { content: [{ type: "text", text: handleApiError(error) }] };
       }
     }
   );

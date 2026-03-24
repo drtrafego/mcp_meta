@@ -1,8 +1,17 @@
 import axios, { AxiosError } from "axios";
+import crypto from "crypto";
 import { FB_GRAPH_URL } from "../constants.js";
 import type { InsightsParams, PrepareParamsOptions } from "../types.js";
+import { getCenario } from "../cenarios.js";
 
 let accessToken: string | null = null;
+
+export function getAccountId(cenario_id?: string): string {
+  if (cenario_id) return getCenario(cenario_id).account_id;
+  const id = process.env.META_AD_ACCOUNT_ID;
+  if (!id) throw new Error("Passe cenario_id como parâmetro ou configure META_AD_ACCOUNT_ID no .env");
+  return id;
+}
 
 /**
  * Get the Meta/Facebook access token from CLI args or environment variable.
@@ -28,17 +37,66 @@ export function getAccessToken(): string {
 }
 
 /**
+ * Generates an appsecret_proof for the Meta Graph API.
+ */
+function getAppsecretProof(token: string): string | undefined {
+  const appSecret = process.env.META_APP_SECRET;
+  if (!appSecret) return undefined;
+  return crypto.createHmac("sha256", appSecret).update(token).digest("hex");
+}
+
+/**
  * Make a GET request to the Facebook Graph API.
  */
 export async function makeGraphApiCall(
   url: string,
-  params: Record<string, unknown>
+  params: Record<string, any>
 ): Promise<unknown> {
+  const token = (params.access_token as string) || getAccessToken();
+  const proof = getAppsecretProof(token);
+  if (proof) {
+    params.appsecret_proof = proof;
+  }
+
   const response = await axios.get(url, {
     params,
     timeout: 30000,
   });
   return response.data;
+}
+
+/**
+ * Make a POST request to the Facebook Graph API.
+ */
+export async function makeGraphApiPostCall(
+  url: string,
+  data: Record<string, any>
+): Promise<unknown> {
+  const token = (data.access_token as string) || getAccessToken();
+  const proof = getAppsecretProof(token);
+  if (proof) {
+    data.appsecret_proof = proof;
+  }
+
+  const appId = process.env.META_APP_ID;
+  if (appId) {
+    data.app_id = appId;
+  }
+
+  console.log(`[META POST] URL: ${url}`);
+  console.log(`[META POST] Data: ${JSON.stringify(data, null, 2)}`);
+
+  try {
+    const response = await axios.post(url, data, {
+      timeout: 30000,
+    });
+    console.log(`[META POST SUCCESS] Response: ${JSON.stringify(response.data, null, 2)}`);
+    return response.data;
+  } catch (error: any) {
+    console.error(`[META POST ERROR] Status: ${error?.response?.status}`);
+    console.error(`[META POST ERROR] Data: ${JSON.stringify(error?.response?.data, null, 2)}`);
+    throw error;
+  }
 }
 
 /**

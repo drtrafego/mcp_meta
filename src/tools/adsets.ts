@@ -4,9 +4,11 @@ import { FB_GRAPH_URL } from "../constants.js";
 import {
   getAccessToken,
   makeGraphApiCall,
+  makeGraphApiPostCall,
   fetchNode,
   prepareParams,
   handleApiError,
+  getAccountId,
 } from "../services/graph-api.js";
 import {
   FieldsSchema,
@@ -17,6 +19,7 @@ import {
   DateFormatSchema,
   EffectiveStatusSchema,
 } from "../schemas/common.js";
+import { getCenario } from "../cenarios.js";
 
 const ADSET_FIELDS_DESC =
   "Fields per ad set. Common: id, name, account_id, campaign_id, status, effective_status, daily_budget, lifetime_budget, budget_remaining, bid_amount, bid_strategy, billing_event, optimization_goal, targeting, start_time, end_time, created_time, updated_time, pacing_type, destination_type";
@@ -121,7 +124,7 @@ Examples:
       description: `Retrieve all ad sets from a specific Meta ad account with filtering and pagination.
 
 Args:
-  - act_id (string): Ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
   - fields (string[]): ${ADSET_FIELDS_DESC}
   - effective_status (string[]): Filter by status: ACTIVE, PAUSED, DELETED, PENDING_REVIEW, DISAPPROVED, PREAPPROVED, PENDING_BILLING_INFO, CAMPAIGN_PAUSED, ARCHIVED, WITH_ISSUES
   - filtering (object[]): Additional filter objects, e.g., [{field: 'daily_budget', operator: 'GREATER_THAN', value: 1000}]
@@ -135,9 +138,9 @@ Returns:
   Object with data (ad set array) and paging. Use meta_ads_fetch_pagination_url with paging.next for more results.`,
       inputSchema: z
         .object({
-          act_id: z
+          cenario_id: z
             .string()
-            .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
           fields: FieldsSchema,
           filtering: FilteringSchema,
           date_preset: DatePresetSchema,
@@ -159,7 +162,7 @@ Returns:
       },
     },
     async ({
-      act_id,
+      cenario_id,
       fields,
       filtering,
       date_preset,
@@ -172,6 +175,7 @@ Returns:
       before,
     }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
         const url = `${FB_GRAPH_URL}/${act_id}/adsets`;
         const params = prepareParams(
@@ -260,4 +264,148 @@ Returns:
       }
     }
   );
+
+  server.registerTool("meta_ads_create_adset", {
+    description: "Create an Ad Set. Budget is multiplied by 100.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      campaign_id: z.string(),
+      name: z.string(),
+      daily_budget: z.number().optional(),
+      lifetime_budget: z.number().optional(),
+      start_time: z.string().optional(),
+      end_time: z.string().optional(),
+      optimization_goal: z.string(),
+      billing_event: z.string().default("IMPRESSIONS"),
+      status: z.enum(["ACTIVE", "PAUSED"]).default("PAUSED"),
+      promoted_object: z.record(z.any()).optional(),
+      targeting: z.record(z.any()).describe("Targeting object. User is free to construct this. Must include advantage_audience: 0"),
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      const payload: Record<string, any> = {
+        access_token: token,
+        campaign_id: params.campaign_id,
+        name: params.name,
+        optimization_goal: params.optimization_goal,
+        billing_event: params.billing_event,
+        status: params.status,
+        targeting: params.targeting
+      };
+      
+      if (!payload.targeting.targeting_automation) {
+        payload.targeting.targeting_automation = { advantage_audience: 0 };
+      }
+      
+      if (params.daily_budget) payload.daily_budget = Math.round(params.daily_budget * 100);
+      if (params.lifetime_budget) payload.lifetime_budget = Math.round(params.lifetime_budget * 100);
+      if (params.start_time) payload.start_time = params.start_time;
+      if (params.end_time) payload.end_time = params.end_time;
+      if (params.promoted_object) payload.promoted_object = JSON.stringify(params.promoted_object);
+      
+      payload.targeting = JSON.stringify(payload.targeting);
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/adsets`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_update_adset", {
+    description: "Update an existing Ad Set.",
+    inputSchema: z.object({
+      adset_id: z.string(),
+      name: z.string().optional(),
+      status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
+      daily_budget: z.number().optional(),
+      lifetime_budget: z.number().optional(),
+      targeting: z.record(z.any()).optional()
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const payload: Record<string, any> = { access_token: token };
+      if (params.name) payload.name = params.name;
+      if (params.status) payload.status = params.status;
+      if (params.daily_budget !== undefined) payload.daily_budget = Math.round(params.daily_budget * 100);
+      if (params.lifetime_budget !== undefined) payload.lifetime_budget = Math.round(params.lifetime_budget * 100);
+      if (params.targeting) {
+        if (!params.targeting.targeting_automation) params.targeting.targeting_automation = { advantage_audience: 0 };
+        payload.targeting = JSON.stringify(params.targeting);
+      }
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${params.adset_id}`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_duplicate_adset", {
+    description: "Duplicate an Ad Set.",
+    inputSchema: z.object({
+      adset_id: z.string(),
+      name: z.string().optional().describe("Name of the new Ad Set"),
+      status_option: z.enum(["ACTIVE", "PAUSED", "INHERIT"]).default("PAUSED")
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const payload: Record<string, any> = { access_token: token, status_option: params.status_option };
+      if (params.name) payload.rename_options = { rename_prefix: params.name }; 
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${params.adset_id}/copies`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_bulk_update_adsets", {
+    description: "Update multiple Ad Sets sequentially.",
+    inputSchema: z.object({
+      adset_ids: z.array(z.string()),
+      status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
+      daily_budget: z.number().optional()
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const results: any[] = [];
+      const payloadBase: Record<string, any> = { access_token: token };
+      if (params.status) payloadBase.status = params.status;
+      if (params.daily_budget !== undefined) payloadBase.daily_budget = Math.round(params.daily_budget * 100);
+
+      for (const id of params.adset_ids) {
+        try {
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          results.push({ id, status: "success", data: res });
+        } catch (e: any) {
+          results.push({ id, status: "error", error: e?.response?.data || e.message });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
 }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { FB_GRAPH_URL, DEFAULT_AD_ACCOUNT_FIELDS } from "../constants.js";
 import { getAccessToken, makeGraphApiCall, fetchNode, handleApiError } from "../services/graph-api.js";
 import { FieldsSchema } from "../schemas/common.js";
+import { getCenario } from "../cenarios.js";
 
 export function registerAccountTools(server: McpServer): void {
   server.registerTool(
@@ -70,9 +71,9 @@ Examples:
   - Use when: "Get details for ad account act_123456"
   - Use when: "What is the currency and balance of my ad account?"`,
       inputSchema: z.object({
-        act_id: z
+        cenario_id: z
           .string()
-          .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+          .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
         fields: FieldsSchema,
       }),
       annotations: {
@@ -82,8 +83,9 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ act_id, fields }) => {
+    async ({ cenario_id, fields }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const effectiveFields = fields && fields.length > 0 ? fields : DEFAULT_AD_ACCOUNT_FIELDS;
         const data = await fetchNode(act_id, { fields: effectiveFields });
         return {

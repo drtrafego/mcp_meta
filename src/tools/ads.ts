@@ -4,9 +4,11 @@ import { FB_GRAPH_URL } from "../constants.js";
 import {
   getAccessToken,
   makeGraphApiCall,
+  makeGraphApiPostCall,
   fetchNode,
   prepareParams,
   handleApiError,
+  getAccountId
 } from "../services/graph-api.js";
 import {
   FieldsSchema,
@@ -17,6 +19,7 @@ import {
   DateFormatSchema,
   EffectiveStatusSchema,
 } from "../schemas/common.js";
+import { getCenario } from "../cenarios.js";
 
 const AD_FIELDS_DESC =
   "Fields per ad. Common: id, name, account_id, adset_id, campaign_id, status, effective_status, configured_status, creative, bid_amount, bid_type, created_time, updated_time, targeting, conversion_specs, recommendations, preview_shareable_link";
@@ -69,7 +72,7 @@ Examples:
       description: `Retrieve all ads from a specific Meta ad account with filtering and pagination.
 
 Args:
-  - act_id (string): Ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
   - fields (string[]): ${AD_FIELDS_DESC}
   - effective_status (string[]): Filter by status: ACTIVE, PAUSED, DELETED, PENDING_REVIEW, DISAPPROVED, PREAPPROVED, PENDING_BILLING_INFO, CAMPAIGN_PAUSED, ARCHIVED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES
   - filtering (object[]): Additional filter objects with field, operator, value
@@ -82,9 +85,9 @@ Returns:
   Object with data (ad array) and paging. Use meta_ads_fetch_pagination_url with paging.next for more results.`,
       inputSchema: z
         .object({
-          act_id: z
+          cenario_id: z
             .string()
-            .describe("Ad account ID prefixed with 'act_', e.g., 'act_1234567890'"),
+            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
           fields: FieldsSchema,
           filtering: FilteringSchema,
           date_preset: DatePresetSchema,
@@ -105,7 +108,7 @@ Returns:
       },
     },
     async ({
-      act_id,
+      cenario_id,
       fields,
       filtering,
       date_preset,
@@ -117,6 +120,7 @@ Returns:
       before,
     }) => {
       try {
+        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
         const url = `${FB_GRAPH_URL}/${act_id}/ads`;
         const params = prepareParams(
@@ -245,4 +249,148 @@ Returns:
       }
     }
   );
+
+  server.registerTool("meta_ads_create_ad", {
+    description: "Create a new Ad linked to an Ad Set and a Creative.",
+    inputSchema: z.object({
+      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      adset_id: z.string(),
+      creative_id: z.string(),
+      name: z.string(),
+      status: z.enum(["ACTIVE", "PAUSED"]).default("PAUSED")
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const actId = getAccountId(params.cenario_id);
+      const token = getAccessToken();
+      const payload: Record<string, any> = {
+        access_token: token,
+        adset_id: params.adset_id,
+        creative: JSON.stringify({ creative_id: params.creative_id }),
+        name: params.name,
+        status: params.status
+      };
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${actId}/ads`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_update_ad", {
+    description: "Update an existing Ad.",
+    inputSchema: z.object({
+      ad_id: z.string(),
+      name: z.string().optional(),
+      status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
+      creative_id: z.string().optional()
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const payload: Record<string, any> = { access_token: token };
+      if (params.name) payload.name = params.name;
+      if (params.status) payload.status = params.status;
+      if (params.creative_id) payload.creative = JSON.stringify({ creative_id: params.creative_id });
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${params.ad_id}`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_duplicate_ad", {
+    description: "Duplicate an Ad.",
+    inputSchema: z.object({
+      ad_id: z.string(),
+      name: z.string().optional().describe("Name of the new Ad"),
+      status_option: z.enum(["ACTIVE", "PAUSED", "INHERIT"]).default("PAUSED")
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const payload: Record<string, any> = { access_token: token, status_option: params.status_option };
+      if (params.name) payload.rename_options = { rename_prefix: params.name }; 
+
+      const data = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${params.ad_id}/copies`, payload);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_bulk_update_ads", {
+    description: "Update multiple Ads sequentially.",
+    inputSchema: z.object({
+      ad_ids: z.array(z.string()),
+      status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const results: any[] = [];
+      const payloadBase: Record<string, any> = { access_token: token };
+      if (params.status) payloadBase.status = params.status;
+
+      for (const id of params.ad_ids) {
+        try {
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          results.push({ id, status: "success", data: res });
+        } catch (e: any) {
+          results.push({ id, status: "error", error: e?.response?.data || e.message });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
+
+  server.registerTool("meta_ads_pause_underperforming_ads", {
+    description: "Pause specific ads that you have identified as underperforming.",
+    inputSchema: z.object({
+      ad_ids: z.array(z.string()).describe("List of ad IDs to pause"),
+      reason: z.string().optional().describe("Why are they being paused (useful for auditing)")
+    }),
+    annotations: {
+      destructiveHint: false,
+      readOnlyHint: false,
+    }
+  }, async (params) => {
+    try {
+      const token = getAccessToken();
+      const results: any[] = [];
+      const payloadBase: Record<string, any> = { access_token: token, status: "PAUSED" };
+
+      for (const id of params.ad_ids) {
+        try {
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          results.push({ id, status: "paused success", reason: params.reason, data: res });
+        } catch (e: any) {
+          results.push({ id, status: "error", error: e?.response?.data || e.message });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: handleApiError(err) }] };
+    }
+  });
 }
