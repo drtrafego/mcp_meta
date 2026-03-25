@@ -8,10 +8,8 @@ import {
   fetchNode,
   prepareParams,
   handleApiError,
-  getAccountId
 } from "../services/graph-api.js";
 import { FieldsSchema, FilteringSchema, PaginationSchema, DateFormatSchema, EffectiveStatusSchema } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
 
 const CREATIVE_FIELDS_DESC =
   "Fields to retrieve. Available: id, name, account_id, actor_id, adlabels, asset_feed_spec, authorization_category, body, call_to_action_type, effective_authorization_category, effective_instagram_media_id, effective_object_story_id, image_hash, image_url, instagram_permalink_url, instagram_story_id, instagram_user_id, link_url, object_id, object_story_id, object_story_spec, object_type, object_url, platform_customizations, product_set_id, status, template_url, thumbnail_url, title, url_tags, use_page_actor_override, video_id";
@@ -26,7 +24,7 @@ export function registerCreativeTools(server: McpServer): void {
 Useful for auditing all creative assets, finding creatives by status, or reviewing creative content across the account.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): ${CREATIVE_FIELDS_DESC}
   - effective_status (string[]): Filter by status: ACTIVE, DELETED, IN_PROCESS, WITH_ISSUES
   - filtering (object[]): Additional filter objects with field, operator, value
@@ -41,9 +39,9 @@ Examples:
   - Use when: "Show all creatives with issues in act_123456"`,
       inputSchema: z
         .object({
-          cenario_id: z
+          account_id: z
             .string()
-            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+            .describe("Ad account ID, e.g. 'act_663136558021878'"),
           fields: FieldsSchema.describe(CREATIVE_FIELDS_DESC),
           effective_status: z
             .array(z.enum(["ACTIVE", "DELETED", "IN_PROCESS", "WITH_ISSUES"]))
@@ -59,11 +57,10 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ cenario_id, fields, effective_status, filtering, limit, after, before }) => {
+    async ({ account_id, fields, effective_status, filtering, limit, after, before }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/adcreatives`;
+        const url = `${FB_GRAPH_URL}/${account_id}/adcreatives`;
         const params = prepareParams(
           { access_token: token },
           { fields, effective_status, filtering, limit, after, before }
@@ -202,7 +199,8 @@ Examples:
   server.registerTool("meta_ads_create_ad_creative", {
     description: "Create a single image or video ad creative.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
+      page_id: z.string().describe("Facebook Page ID, e.g. '109902140539351'"),
       name: z.string(),
       title: z.string().optional().describe("Headline"),
       body: z.string().optional().describe("Primary text"),
@@ -210,8 +208,9 @@ Examples:
       image_hash: z.string().optional(),
       video_id: z.string().optional(),
       thumbnail_url: z.string().optional(),
-      call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "SEND_MESSAGE", "APPLY_NOW", "BOOK_TRAVEL"]).default("LEARN_MORE"),
-      link_url: z.string().optional()
+      call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "SEND_MESSAGE", "APPLY_NOW", "BOOK_TRAVEL", "WHATSAPP_MESSAGE", "WHATSAPP_LINK", "CHAT_ON_WHATSAPP"]).default("LEARN_MORE"),
+      link_url: z.string().optional(),
+      thumbnail_hash: z.string().optional().describe("image_hash to use as thumbnail for video creatives")
     }),
     annotations: {
       destructiveHint: false,
@@ -219,10 +218,8 @@ Examples:
     }
   }, async (params) => {
     try {
-      const cenario = getCenario(params.cenario_id);
-      const actId = cenario.account_id;
-      const pageId = cenario.page_id;
-      const igId = cenario.instagram_user_id;
+      const actId = params.account_id;
+      const pageId = params.page_id;
 
       const token = getAccessToken();
       const payload: Record<string, any> = {
@@ -230,35 +227,31 @@ Examples:
         name: params.name,
       };
 
+      const ctaType = params.call_to_action_type || 'LEARN_MORE';
+      const isWhatsApp = ctaType === 'WHATSAPP_MESSAGE' || ctaType === 'WHATSAPP_LINK' || ctaType === 'CHAT_ON_WHATSAPP';
+      const ctaValue: Record<string, any> = { link: params.link_url };
+      if (isWhatsApp) ctaValue.app_destination = 'WHATSAPP';
+
       if (params.video_id) {
-        payload.object_story_spec = {
-          page_id: pageId,
-          instagram_user_id: igId,
-          video_data: {
-            video_id: params.video_id,
-            message: params.body,
-            title: params.title,
-            call_to_action: {
-              type: params.call_to_action_type || 'LEARN_MORE',
-              value: { link: params.link_url }
-            }
-          }
+        const videoData: Record<string, any> = {
+          video_id: params.video_id,
+          message: params.body,
+          title: params.title,
+          call_to_action: { type: ctaType, value: ctaValue }
         };
-        if (params.thumbnail_url) payload.object_story_spec.video_data.image_url = params.thumbnail_url;
+        if (params.thumbnail_url) videoData.image_url = params.thumbnail_url;
+        if (params.thumbnail_hash) videoData.image_hash = params.thumbnail_hash;
+        payload.object_story_spec = { page_id: pageId, video_data: videoData };
       } else if (params.image_hash) {
         payload.object_story_spec = {
           page_id: pageId,
-          instagram_user_id: igId,
           link_data: {
             image_hash: params.image_hash,
             message: params.body,
             name: params.title,
             description: params.description,
             link: params.link_url,
-            call_to_action: {
-              type: params.call_to_action_type || 'LEARN_MORE',
-              value: { link: params.link_url }
-            }
+            call_to_action: { type: ctaType, value: ctaValue }
           }
         };
       } else {
@@ -275,7 +268,8 @@ Examples:
   server.registerTool("meta_ads_create_carousel_ad_creative", {
     description: "Create a carousel ad creative. NEVER pass instagram_actor_id in carousels.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
+      page_id: z.string().describe("Facebook Page ID, e.g. '109902140539351'"),
       name: z.string(),
       body: z.string().optional().describe("Primary text appearing above carousel"),
       link_url: z.string().describe("Fallback link URL for the carousel"),
@@ -294,9 +288,8 @@ Examples:
     }
   }, async (params) => {
     try {
-      const cenario = getCenario(params.cenario_id);
-      const actId = cenario.account_id;
-      const pageId = cenario.page_id;
+      const actId = params.account_id;
+      const pageId = params.page_id;
       // CRITICAL RULE: Never pass instagram_actor_id in carousel!
       
       const token = getAccessToken();
