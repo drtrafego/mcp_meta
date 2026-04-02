@@ -33,6 +33,7 @@ import { registerMediaTools } from "./tools/media.js";
 import { registerActivityTools } from "./tools/activities.js";
 import { registerPaginationTools } from "./tools/pagination.js";
 import { registerAudiencesTools } from "./tools/audiences.js";
+import { registerCrmTools } from "./tools/crm.js";
 import { getAccessToken } from "./services/graph-api.js";
 import { z } from "zod";
 import { listCenarios } from "./cenarios.js";
@@ -52,6 +53,7 @@ registerMediaTools(server);
 registerActivityTools(server);
 registerPaginationTools(server);
 registerAudiencesTools(server);
+registerCrmTools(server);
 
 server.registerTool('list_cenarios', {
   description: 'Lista todos os cenários/clientes disponíveis com account_id.',

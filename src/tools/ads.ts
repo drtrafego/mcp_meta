@@ -8,7 +8,6 @@ import {
   fetchNode,
   prepareParams,
   handleApiError,
-  getAccountId
 } from "../services/graph-api.js";
 import {
   FieldsSchema,
@@ -19,7 +18,8 @@ import {
   DateFormatSchema,
   EffectiveStatusSchema,
 } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
+import { validateBulkSize } from "../services/validators.js";
+import { BULK_DELAY_MS, MAX_BULK_ITEMS, sleep } from "../services/rate-limiter.js";
 
 const AD_FIELDS_DESC =
   "Fields per ad. Common: id, name, account_id, adset_id, campaign_id, status, effective_status, configured_status, creative, bid_amount, bid_type, created_time, updated_time, targeting, conversion_specs, recommendations, preview_shareable_link";
@@ -72,7 +72,7 @@ Examples:
       description: `Retrieve all ads from a specific Meta ad account with filtering and pagination.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): ${AD_FIELDS_DESC}
   - effective_status (string[]): Filter by status: ACTIVE, PAUSED, DELETED, PENDING_REVIEW, DISAPPROVED, PREAPPROVED, PENDING_BILLING_INFO, CAMPAIGN_PAUSED, ARCHIVED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES
   - filtering (object[]): Additional filter objects with field, operator, value
@@ -85,9 +85,9 @@ Returns:
   Object with data (ad array) and paging. Use meta_ads_fetch_pagination_url with paging.next for more results.`,
       inputSchema: z
         .object({
-          cenario_id: z
+          account_id: z
             .string()
-            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+            .describe("Ad account ID, e.g. 'act_663136558021878'"),
           fields: FieldsSchema,
           filtering: FilteringSchema,
           date_preset: DatePresetSchema,
@@ -108,7 +108,7 @@ Returns:
       },
     },
     async ({
-      cenario_id,
+      account_id,
       fields,
       filtering,
       date_preset,
@@ -120,9 +120,8 @@ Returns:
       before,
     }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/ads`;
+        const url = `${FB_GRAPH_URL}/${account_id}/ads`;
         const params = prepareParams(
           { access_token: token },
           {
@@ -253,7 +252,7 @@ Returns:
   server.registerTool("meta_ads_create_ad", {
     description: "Create a new Ad linked to an Ad Set and a Creative.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       adset_id: z.string(),
       creative_id: z.string(),
       name: z.string(),
@@ -265,7 +264,7 @@ Returns:
     }
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const actId = params.account_id;
       const token = getAccessToken();
       const payload: Record<string, any> = {
         access_token: token,
@@ -334,9 +333,9 @@ Returns:
   });
 
   server.registerTool("meta_ads_bulk_update_ads", {
-    description: "Update multiple Ads sequentially.",
+    description: `Update multiple Ads sequentially with rate-limit-safe delays. Maximum ${MAX_BULK_ITEMS} ads per call.`,
     inputSchema: z.object({
-      ad_ids: z.array(z.string()),
+      ad_ids: z.array(z.string()).max(MAX_BULK_ITEMS),
       status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
     }),
     annotations: {
@@ -345,18 +344,25 @@ Returns:
     }
   }, async (params) => {
     try {
+      const bulkError = validateBulkSize(params.ad_ids, MAX_BULK_ITEMS, "ads");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
       const token = getAccessToken();
       const results: any[] = [];
       const payloadBase: Record<string, any> = { access_token: token };
       if (params.status) payloadBase.status = params.status;
 
-      for (const id of params.ad_ids) {
+      for (let i = 0; i < params.ad_ids.length; i++) {
+        const id = params.ad_ids[i];
         try {
-          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, { ...payloadBase });
           results.push({ id, status: "success", data: res });
         } catch (e: any) {
           results.push({ id, status: "error", error: e?.response?.data || e.message });
         }
+        if (i < params.ad_ids.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err) {
@@ -365,9 +371,9 @@ Returns:
   });
 
   server.registerTool("meta_ads_pause_underperforming_ads", {
-    description: "Pause specific ads that you have identified as underperforming.",
+    description: `Pause specific ads that you have identified as underperforming. Maximum ${MAX_BULK_ITEMS} ads per call.`,
     inputSchema: z.object({
-      ad_ids: z.array(z.string()).describe("List of ad IDs to pause"),
+      ad_ids: z.array(z.string()).max(MAX_BULK_ITEMS).describe("List of ad IDs to pause"),
       reason: z.string().optional().describe("Why are they being paused (useful for auditing)")
     }),
     annotations: {
@@ -376,17 +382,24 @@ Returns:
     }
   }, async (params) => {
     try {
+      const bulkError = validateBulkSize(params.ad_ids, MAX_BULK_ITEMS, "ads");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
       const token = getAccessToken();
       const results: any[] = [];
       const payloadBase: Record<string, any> = { access_token: token, status: "PAUSED" };
 
-      for (const id of params.ad_ids) {
+      for (let i = 0; i < params.ad_ids.length; i++) {
+        const id = params.ad_ids[i];
         try {
-          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, { ...payloadBase });
           results.push({ id, status: "paused success", reason: params.reason, data: res });
         } catch (e: any) {
           results.push({ id, status: "error", error: e?.response?.data || e.message });
         }
+        if (i < params.ad_ids.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err) {

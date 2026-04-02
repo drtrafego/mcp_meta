@@ -10,6 +10,7 @@ import {
   handleApiError,
 } from "../services/graph-api.js";
 import { FieldsSchema, FilteringSchema, PaginationSchema, DateFormatSchema, EffectiveStatusSchema } from "../schemas/common.js";
+import { validateCreativeName, validateCarouselCards, validateImageHash, validateUrl } from "../services/validators.js";
 
 const CREATIVE_FIELDS_DESC =
   "Fields to retrieve. Available: id, name, account_id, actor_id, adlabels, asset_feed_spec, authorization_category, body, call_to_action_type, effective_authorization_category, effective_instagram_media_id, effective_object_story_id, image_hash, image_url, instagram_permalink_url, instagram_story_id, instagram_user_id, link_url, object_id, object_story_id, object_story_spec, object_type, object_url, platform_customizations, product_set_id, status, template_url, thumbnail_url, title, url_tags, use_page_actor_override, video_id";
@@ -197,19 +198,20 @@ Examples:
   );
 
   server.registerTool("meta_ads_create_ad_creative", {
-    description: "Create a single image or video ad creative.",
+    description: "Create a single image or video ad creative. Always include instagram_actor_id for Instagram delivery.",
     inputSchema: z.object({
       account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       page_id: z.string().describe("Facebook Page ID, e.g. '109902140539351'"),
-      name: z.string(),
-      title: z.string().optional().describe("Headline"),
-      body: z.string().optional().describe("Primary text"),
-      description: z.string().optional().describe("Description for link_data"),
-      image_hash: z.string().optional(),
+      instagram_actor_id: z.string().optional().describe("Instagram account ID for Instagram placements. STRONGLY RECOMMENDED for proper Instagram delivery."),
+      name: z.string().max(100),
+      title: z.string().optional().describe("Headline (recommended max 27 chars for FB Feed)"),
+      body: z.string().optional().describe("Primary text (recommended 50-150 chars)"),
+      description: z.string().optional().describe("Description for link_data (recommended max 18 chars)"),
+      image_hash: z.string().optional().describe("32-char hex hash from image upload"),
       video_id: z.string().optional(),
       thumbnail_url: z.string().optional(),
-      call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "SEND_MESSAGE", "APPLY_NOW", "BOOK_TRAVEL", "WHATSAPP_MESSAGE", "WHATSAPP_LINK", "CHAT_ON_WHATSAPP"]).default("LEARN_MORE"),
-      link_url: z.string().optional(),
+      call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "SEND_MESSAGE", "APPLY_NOW", "BOOK_TRAVEL", "BOOK_NOW", "DOWNLOAD", "GET_OFFER", "GET_QUOTE", "BUY_NOW", "WATCH_MORE", "CALL_NOW", "WHATSAPP_MESSAGE", "WHATSAPP_LINK", "CHAT_ON_WHATSAPP"]).default("LEARN_MORE"),
+      link_url: z.string().optional().describe("Landing page URL (max 1000 chars)"),
       thumbnail_hash: z.string().optional().describe("image_hash to use as thumbnail for video creatives")
     }),
     annotations: {
@@ -218,6 +220,27 @@ Examples:
     }
   }, async (params) => {
     try {
+      // Validate creative name
+      const nameError = validateCreativeName(params.name);
+      if (nameError) {
+        return { content: [{ type: "text", text: `Validation Error: ${nameError}` }] };
+      }
+
+      // Validate image_hash format
+      if (params.image_hash && !validateImageHash(params.image_hash)) {
+        return { content: [{ type: "text", text: "Validation Error: image_hash must be a 32-character hex string." }] };
+      }
+
+      // Validate link_url
+      if (params.link_url && !validateUrl(params.link_url)) {
+        return { content: [{ type: "text", text: "Validation Error: link_url is not a valid URL." }] };
+      }
+
+      // Validate link_url length
+      if (params.link_url && params.link_url.length > 1000) {
+        return { content: [{ type: "text", text: "Validation Error: link_url exceeds 1000 character limit." }] };
+      }
+
       const actId = params.account_id;
       const pageId = params.page_id;
 
@@ -229,8 +252,16 @@ Examples:
 
       const ctaType = params.call_to_action_type || 'LEARN_MORE';
       const isWhatsApp = ctaType === 'WHATSAPP_MESSAGE' || ctaType === 'WHATSAPP_LINK' || ctaType === 'CHAT_ON_WHATSAPP';
-      const ctaValue: Record<string, any> = { link: params.link_url };
-      if (isWhatsApp) ctaValue.app_destination = 'WHATSAPP';
+      // WHATSAPP_MESSAGE does not accept "link" in the CTA value — phone comes from page
+      const ctaValue: Record<string, any> = ctaType === 'WHATSAPP_MESSAGE'
+        ? { app_destination: 'WHATSAPP' }
+        : { link: params.link_url, ...(isWhatsApp ? { app_destination: 'WHATSAPP' } : {}) };
+
+      const storySpec: Record<string, any> = { page_id: pageId };
+      // Include instagram_actor_id for Instagram delivery
+      if (params.instagram_actor_id) {
+        storySpec.instagram_actor_id = params.instagram_actor_id;
+      }
 
       if (params.video_id) {
         const videoData: Record<string, any> = {
@@ -241,19 +272,18 @@ Examples:
         };
         if (params.thumbnail_url) videoData.image_url = params.thumbnail_url;
         if (params.thumbnail_hash) videoData.image_hash = params.thumbnail_hash;
-        payload.object_story_spec = { page_id: pageId, video_data: videoData };
+        storySpec.video_data = videoData;
+        payload.object_story_spec = storySpec;
       } else if (params.image_hash) {
-        payload.object_story_spec = {
-          page_id: pageId,
-          link_data: {
-            image_hash: params.image_hash,
-            message: params.body,
-            name: params.title,
-            description: params.description,
-            link: params.link_url,
-            call_to_action: { type: ctaType, value: ctaValue }
-          }
+        storySpec.link_data = {
+          image_hash: params.image_hash,
+          message: params.body,
+          name: params.title,
+          description: params.description,
+          link: params.link_url,
+          call_to_action: { type: ctaType, value: ctaValue }
         };
+        payload.object_story_spec = storySpec;
       } else {
         throw new Error("You must provide either image_hash or video_id.");
       }
@@ -266,11 +296,11 @@ Examples:
   });
 
   server.registerTool("meta_ads_create_carousel_ad_creative", {
-    description: "Create a carousel ad creative. NEVER pass instagram_actor_id in carousels.",
+    description: "Create a carousel ad creative. Requires 2-10 cards. NEVER pass instagram_actor_id in carousels.",
     inputSchema: z.object({
       account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       page_id: z.string().describe("Facebook Page ID, e.g. '109902140539351'"),
-      name: z.string(),
+      name: z.string().max(100),
       body: z.string().optional().describe("Primary text appearing above carousel"),
       link_url: z.string().describe("Fallback link URL for the carousel"),
       cards: z.array(z.object({
@@ -279,8 +309,8 @@ Examples:
         image_hash: z.string().optional(),
         video_id: z.string().optional(),
         link: z.string().optional(),
-        call_to_action_type: z.string().default("LEARN_MORE")
-      }))
+        call_to_action_type: z.enum(["LEARN_MORE", "SHOP_NOW", "SIGN_UP", "SUBSCRIBE", "CONTACT_US", "APPLY_NOW", "BUY_NOW", "DOWNLOAD", "GET_OFFER", "BOOK_NOW", "WHATSAPP_MESSAGE"]).default("LEARN_MORE")
+      })).min(2).max(10)
     }),
     annotations: {
       destructiveHint: false,
@@ -288,10 +318,27 @@ Examples:
     }
   }, async (params) => {
     try {
+      // Validate creative name
+      const nameError = validateCreativeName(params.name);
+      if (nameError) {
+        return { content: [{ type: "text", text: `Validation Error: ${nameError}` }] };
+      }
+
+      // Validate carousel cards
+      const cardsCheck = validateCarouselCards(params.cards);
+      if (!cardsCheck.valid) {
+        return { content: [{ type: "text", text: `Validation Error: ${cardsCheck.error}` }] };
+      }
+
+      // Validate link_url
+      if (!validateUrl(params.link_url)) {
+        return { content: [{ type: "text", text: "Validation Error: link_url is not a valid URL." }] };
+      }
+
       const actId = params.account_id;
       const pageId = params.page_id;
       // CRITICAL RULE: Never pass instagram_actor_id in carousel!
-      
+
       const token = getAccessToken();
       const payload: Record<string, any> = {
         access_token: token,

@@ -3,7 +3,6 @@ import { z } from "zod";
 import { FB_GRAPH_URL, DEFAULT_AD_ACCOUNT_FIELDS } from "../constants.js";
 import { getAccessToken, makeGraphApiCall, fetchNode, handleApiError } from "../services/graph-api.js";
 import { FieldsSchema } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
 
 export function registerAccountTools(server: McpServer): void {
   server.registerTool(
@@ -55,7 +54,7 @@ Examples:
       description: `Get detailed information about a specific Meta ad account.
 
 Args:
-  - act_id (string): The ad account ID prefixed with 'act_', e.g., 'act_1234567890'
+  - account_id (string): The ad account ID prefixed with 'act_', e.g., 'act_1234567890'
   - fields (string[]): Optional. Fields to retrieve. If omitted, defaults to: name, business_name, age, account_status, balance, amount_spent, attribution_spec, account_id, business, business_city, brand_safety_content_filter_levels, currency, created_time, id.
 
 Returns:
@@ -71,9 +70,9 @@ Examples:
   - Use when: "Get details for ad account act_123456"
   - Use when: "What is the currency and balance of my ad account?"`,
       inputSchema: z.object({
-        cenario_id: z
+        account_id: z
           .string()
-          .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+          .describe("Ad account ID, e.g. 'act_663136558021878'"),
         fields: FieldsSchema,
       }),
       annotations: {
@@ -83,11 +82,10 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ cenario_id, fields }) => {
+    async ({ account_id, fields }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const effectiveFields = fields && fields.length > 0 ? fields : DEFAULT_AD_ACCOUNT_FIELDS;
-        const data = await fetchNode(act_id, { fields: effectiveFields });
+        const data = await fetchNode(account_id, { fields: effectiveFields });
         return {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
           structuredContent: data as Record<string, unknown>,

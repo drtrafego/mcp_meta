@@ -8,7 +8,8 @@ import {
   handleApiError,
 } from "../services/graph-api.js";
 import { InsightsInputSchema } from "../schemas/insights.js";
-import { getCenario } from "../cenarios.js";
+import { BULK_DELAY_MS, MAX_BULK_ITEMS, sleep } from "../services/rate-limiter.js";
+import { validateBulkSize } from "../services/validators.js";
 
 const INSIGHTS_DESCRIPTION_SUFFIX = `
 
@@ -39,7 +40,7 @@ export function registerInsightsTools(server: McpServer): void {
 Fetches metrics like impressions, reach, clicks, spend, conversions, and more for an entire ad account. Supports time range definitions, demographic breakdowns, and attribution settings.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): Metrics to retrieve. Common: impressions, reach, clicks, spend, ctr, cpc, cpm, cpp, frequency, actions, conversions, cost_per_action_type
   - date_preset (string): Relative time range preset (default: last_30d)
   - time_range (object): Custom range {'since':'YYYY-MM-DD','until':'YYYY-MM-DD'}
@@ -47,9 +48,9 @@ Args:
   - breakdowns (string[]): Segment by: age, gender, country, impression_device, publisher_platform, etc.
   - See full parameter list in inputSchema${INSIGHTS_DESCRIPTION_SUFFIX}`,
       inputSchema: InsightsInputSchema.extend({
-        cenario_id: z
+        account_id: z
           .string()
-          .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+          .describe("Ad account ID, e.g. 'act_663136558021878'"),
       }),
       annotations: {
         readOnlyHint: true,
@@ -58,11 +59,10 @@ Args:
         openWorldHint: true,
       },
     },
-    async ({ cenario_id, ...insightParams }) => {
+    async ({ account_id, ...insightParams }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/insights`;
+        const url = `${FB_GRAPH_URL}/${account_id}/insights`;
         const params = buildInsightsParams({ access_token: token }, {
           ...insightParams,
           level: insightParams.level ?? "account",
@@ -205,9 +205,9 @@ Args:
     "meta_ads_bulk_get_insights",
     {
       title: "Bulk Get Meta Ads Insights",
-      description: "Fetch insights for multiple specific objects (campaigns, ad sets, or ads) sequentially.",
+      description: `Fetch insights for multiple specific objects (campaigns, ad sets, or ads) sequentially. Maximum ${MAX_BULK_ITEMS} IDs per call.`,
       inputSchema: InsightsInputSchema.extend({
-        object_ids: z.array(z.string()).describe("List of IDs to fetch insights for")
+        object_ids: z.array(z.string()).max(MAX_BULK_ITEMS).describe("List of IDs to fetch insights for")
       }),
       annotations: {
         readOnlyHint: true,
@@ -218,14 +218,20 @@ Args:
     },
     async ({ object_ids, ...insightParams }) => {
       try {
+        const bulkError = validateBulkSize(object_ids, MAX_BULK_ITEMS, "object IDs");
+        if (bulkError) {
+          return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+        }
+
         const token = getAccessToken();
         const results: any[] = [];
         const params = buildInsightsParams({ access_token: token }, {
           ...insightParams,
           level: insightParams.level ?? "ad",
         });
-        
-        for (const id of object_ids) {
+
+        for (let i = 0; i < object_ids.length; i++) {
+          const id = object_ids[i];
           try {
             const url = `${FB_GRAPH_URL}/${id}/insights`;
             const data = await makeGraphApiCall(url, params);
@@ -233,6 +239,7 @@ Args:
           } catch (e: any) {
             results.push({ id, status: "error", error: e?.response?.data || e.message });
           }
+          if (i < object_ids.length - 1) await sleep(BULK_DELAY_MS);
         }
         return buildInsightsResult(results);
       } catch (error) {

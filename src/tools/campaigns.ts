@@ -8,7 +8,6 @@ import {
   fetchNode,
   prepareParams,
   handleApiError,
-  getAccountId
 } from "../services/graph-api.js";
 import {
   FieldsSchema,
@@ -19,7 +18,15 @@ import {
   DateFormatSchema,
   EffectiveStatusSchema,
 } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
+import {
+  validateBudget,
+  validateEnum,
+  validateBulkSize,
+  checkDeprecatedValues,
+  VALID_SPECIAL_AD_CATEGORIES,
+  VALID_BID_STRATEGIES,
+} from "../services/validators.js";
+import { BULK_DELAY_MS, MAX_BULK_ITEMS, sleep } from "../services/rate-limiter.js";
 
 export function registerCampaignTools(server: McpServer): void {
   server.registerTool(
@@ -74,7 +81,7 @@ Examples:
       description: `Retrieve all campaigns from a specific Meta ad account with filtering and pagination.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): Fields per campaign. Common: id, name, objective, effective_status, created_time, daily_budget, lifetime_budget, budget_remaining
   - effective_status (string[]): Filter by status: ACTIVE, PAUSED, DELETED, PENDING_REVIEW, DISAPPROVED, PREAPPROVED, PENDING_BILLING_INFO, ARCHIVED, WITH_ISSUES
   - objective (string[]): Filter by objective: APP_INSTALLS, BRAND_AWARENESS, CONVERSIONS, EVENT_RESPONSES, LEAD_GENERATION, LINK_CLICKS, MESSAGES, PAGE_LIKES, POST_ENGAGEMENT, PRODUCT_CATALOG_SALES, REACH, VIDEO_VIEWS
@@ -92,9 +99,9 @@ Returns:
   Object with data (campaign array) and paging. Use meta_ads_fetch_pagination_url with paging.next for more results.`,
       inputSchema: z
         .object({
-          cenario_id: z
+          account_id: z
             .string()
-            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+            .describe("Ad account ID, e.g. 'act_663136558021878'"),
           fields: FieldsSchema,
           filtering: FilteringSchema,
           date_preset: DatePresetSchema,
@@ -110,10 +117,10 @@ Returns:
             .optional()
             .describe("True = only completed, False = only active, null = both"),
           special_ad_categories: z
-            .array(z.enum(["EMPLOYMENT", "HOUSING", "CREDIT", "ISSUES_ELECTIONS_POLITICS", "NONE"]))
+            .array(z.enum(["EMPLOYMENT", "HOUSING", "FINANCIAL_PRODUCTS_SERVICES", "ISSUES_ELECTIONS_POLITICS", "ONLINE_GAMBLING_AND_GAMING", "NONE"]))
             .optional()
             .describe(
-              "Filter by special ad categories: EMPLOYMENT, HOUSING, CREDIT, ISSUES_ELECTIONS_POLITICS, NONE"
+              "Filter by special ad categories: EMPLOYMENT, HOUSING, FINANCIAL_PRODUCTS_SERVICES, ISSUES_ELECTIONS_POLITICS, ONLINE_GAMBLING_AND_GAMING, NONE"
             ),
           objective: z
             .array(z.string())
@@ -140,7 +147,7 @@ Returns:
       },
     },
     async ({
-      cenario_id,
+      account_id,
       fields,
       filtering,
       date_preset,
@@ -158,9 +165,8 @@ Returns:
       before,
     }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/campaigns`;
+        const url = `${FB_GRAPH_URL}/${account_id}/campaigns`;
         const params = prepareParams(
           { access_token: token },
           {
@@ -193,16 +199,16 @@ Returns:
   );
 
   server.registerTool("meta_ads_create_campaign", {
-    description: "Create a new campaign using cenario_id. Budget is entered in standard currency and multiplied by 100 automatically.",
+    description: "Create a new campaign. Budget is entered in standard currency and multiplied by 100 automatically.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       name: z.string(),
       objective: z.enum(["OUTCOME_AWARENESS", "OUTCOME_TRAFFIC", "OUTCOME_ENGAGEMENT", "OUTCOME_LEADS", "OUTCOME_SALES", "OUTCOME_APP_PROMOTION"]).describe("Must be an ODAX objective"),
       status: z.enum(["ACTIVE", "PAUSED"]).default("PAUSED"),
-      special_ad_categories: z.array(z.string()).default(["NONE"]),
+      special_ad_categories: z.array(z.enum(["NONE", "EMPLOYMENT", "HOUSING", "FINANCIAL_PRODUCTS_SERVICES", "ISSUES_ELECTIONS_POLITICS", "ONLINE_GAMBLING_AND_GAMING"])).default(["NONE"]).describe("REQUIRED. Use FINANCIAL_PRODUCTS_SERVICES instead of CREDIT (deprecated Jan 2025)"),
       daily_budget: z.number().optional(),
       lifetime_budget: z.number().optional(),
-      bid_strategy: z.string().default("LOWEST_COST_WITHOUT_CAP"),
+      bid_strategy: z.enum(["LOWEST_COST_WITHOUT_CAP", "LOWEST_COST_WITH_BID_CAP", "COST_CAP", "LOWEST_COST_WITH_MIN_ROAS"]).default("LOWEST_COST_WITHOUT_CAP"),
     }),
     annotations: {
       destructiveHint: false,
@@ -210,7 +216,19 @@ Returns:
     }
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      // Validate budget
+      const budgetCheck = validateBudget(params.daily_budget, params.lifetime_budget);
+      if (!budgetCheck.valid) {
+        return { content: [{ type: "text", text: `Validation Error: ${budgetCheck.error}` }] };
+      }
+
+      // Check for deprecated values
+      const deprecations = checkDeprecatedValues({ special_ad_categories: params.special_ad_categories });
+      if (deprecations.length > 0) {
+        return { content: [{ type: "text", text: `Validation Error: ${deprecations.join("; ")}` }] };
+      }
+
+      const actId = params.account_id;
       const token = getAccessToken();
       const payload: Record<string, any> = {
         access_token: token,
@@ -245,6 +263,12 @@ Returns:
     }
   }, async (params) => {
     try {
+      // Validate budget
+      const budgetCheck = validateBudget(params.daily_budget, params.lifetime_budget);
+      if (!budgetCheck.valid) {
+        return { content: [{ type: "text", text: `Validation Error: ${budgetCheck.error}` }] };
+      }
+
       const token = getAccessToken();
       const payload: Record<string, any> = { access_token: token };
       if (params.name) payload.name = params.name;
@@ -284,9 +308,9 @@ Returns:
   });
 
   server.registerTool("meta_ads_bulk_update_campaigns", {
-    description: "Update multiple campaigns at once. Note: Operations are sequential.",
+    description: `Update multiple campaigns at once. Operations are sequential with rate-limit-safe delays. Maximum ${MAX_BULK_ITEMS} campaigns per call.`,
     inputSchema: z.object({
-      campaign_ids: z.array(z.string()),
+      campaign_ids: z.array(z.string()).max(MAX_BULK_ITEMS),
       status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]).optional(),
       daily_budget: z.number().optional()
     }),
@@ -296,19 +320,36 @@ Returns:
     }
   }, async (params) => {
     try {
+      // Validate bulk size
+      const bulkError = validateBulkSize(params.campaign_ids, MAX_BULK_ITEMS, "campaigns");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
+      // Validate budget if provided
+      if (params.daily_budget !== undefined) {
+        const budgetCheck = validateBudget(params.daily_budget);
+        if (!budgetCheck.valid) {
+          return { content: [{ type: "text", text: `Validation Error: ${budgetCheck.error}` }] };
+        }
+      }
+
       const token = getAccessToken();
       const results: any[] = [];
       const payloadBase: Record<string, any> = { access_token: token };
       if (params.status) payloadBase.status = params.status;
       if (params.daily_budget !== undefined) payloadBase.daily_budget = Math.round(params.daily_budget * 100);
 
-      for (const id of params.campaign_ids) {
+      for (let i = 0; i < params.campaign_ids.length; i++) {
+        const id = params.campaign_ids[i];
         try {
-          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, payloadBase);
+          const res = await makeGraphApiPostCall(`${FB_GRAPH_URL}/${id}`, { ...payloadBase });
           results.push({ id, status: "success", data: res });
         } catch (e: any) {
           results.push({ id, status: "error", error: e?.response?.data || e.message });
         }
+        // Rate-limit-safe delay between calls
+        if (i < params.campaign_ids.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err) {

@@ -2,16 +2,9 @@ import axios, { AxiosError } from "axios";
 import crypto from "crypto";
 import { FB_GRAPH_URL } from "../constants.js";
 import type { InsightsParams, PrepareParamsOptions } from "../types.js";
-import { getCenario } from "../cenarios.js";
+import { parseRateLimitHeaders, withRateLimitRetry } from "./rate-limiter.js";
 
 let accessToken: string | null = null;
-
-export function getAccountId(cenario_id?: string): string {
-  if (cenario_id) return getCenario(cenario_id).account_id;
-  const id = process.env.META_AD_ACCOUNT_ID;
-  if (!id) throw new Error("Passe cenario_id como parâmetro ou configure META_AD_ACCOUNT_ID no .env");
-  return id;
-}
 
 /**
  * Get the Meta/Facebook access token from CLI args or environment variable.
@@ -58,11 +51,17 @@ export async function makeGraphApiCall(
     params.appsecret_proof = proof;
   }
 
-  const response = await axios.get(url, {
-    params,
-    timeout: 30000,
-  });
-  return response.data;
+  // Extract account ID for rate limit tracking
+  const accountId = extractAccountId(url);
+
+  return withRateLimitRetry(async () => {
+    const response = await axios.get(url, {
+      params,
+      timeout: 30000,
+    });
+    parseRateLimitHeaders(response.headers as Record<string, string>, accountId);
+    return response.data;
+  }, accountId);
 }
 
 /**
@@ -83,20 +82,29 @@ export async function makeGraphApiPostCall(
     data.app_id = appId;
   }
 
+  // Safe logging: exclude access_token and appsecret_proof
+  const safeData = { ...data };
+  delete safeData.access_token;
+  delete safeData.appsecret_proof;
   console.log(`[META POST] URL: ${url}`);
-  console.log(`[META POST] Data: ${JSON.stringify(data, null, 2)}`);
+  console.log(`[META POST] Data: ${JSON.stringify(safeData, null, 2)}`);
 
-  try {
-    const response = await axios.post(url, data, {
-      timeout: 30000,
-    });
-    console.log(`[META POST SUCCESS] Response: ${JSON.stringify(response.data, null, 2)}`);
-    return response.data;
-  } catch (error: any) {
-    console.error(`[META POST ERROR] Status: ${error?.response?.status}`);
-    console.error(`[META POST ERROR] Data: ${JSON.stringify(error?.response?.data, null, 2)}`);
-    throw error;
-  }
+  const accountId = extractAccountId(url);
+
+  return withRateLimitRetry(async () => {
+    try {
+      const response = await axios.post(url, data, {
+        timeout: 30000,
+      });
+      parseRateLimitHeaders(response.headers as Record<string, string>, accountId);
+      console.log(`[META POST SUCCESS] ID: ${(response.data as any)?.id || "ok"}`);
+      return response.data;
+    } catch (error: any) {
+      console.error(`[META POST ERROR] Status: ${error?.response?.status}`);
+      console.error(`[META POST ERROR] Message: ${error?.response?.data?.error?.message || "unknown"}`);
+      throw error;
+    }
+  }, accountId);
 }
 
 /**
@@ -281,4 +289,12 @@ export function handleApiError(error: unknown): string {
     }
   }
   return `Error: Unexpected error — ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/**
+ * Extract ad account ID from a Graph API URL for rate limit tracking.
+ */
+function extractAccountId(url: string): string | undefined {
+  const match = url.match(/act_\d+/);
+  return match ? match[0] : undefined;
 }

@@ -8,7 +8,6 @@ import {
   handleApiError,
 } from "../services/graph-api.js";
 import { FieldsSchema, PaginationSchema, TimeRangeSchema } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
 
 const ACTIVITY_FIELDS_DESC =
   "Fields to retrieve. Available: actor_id, actor_name, application_id, application_name, changed_data, date_time_in_timezone, event_time, event_type, extra_data, object_id, object_name, object_type, translated_event_type";
@@ -35,7 +34,7 @@ export function registerActivityTools(server: McpServer): void {
 Returns key updates to the account and associated ad objects, including status changes, budget updates, targeting changes, and more. By default returns one week of data.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): ${ACTIVITY_FIELDS_DESC}
   - limit (number): Maximum activities per page
   - after / before (string): Pagination cursors
@@ -49,9 +48,9 @@ Examples:
   - Use when: "Who changed the budget on this account in January 2024?"`,
       inputSchema: z
         .object({
-          cenario_id: z
+          account_id: z
             .string()
-            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+            .describe("Ad account ID, e.g. 'act_663136558021878'"),
           fields: FieldsSchema.describe(ACTIVITY_FIELDS_DESC),
           time_range: TimeRangeSchema.optional().describe(
             "Custom time range {'since':'YYYY-MM-DD','until':'YYYY-MM-DD'}. Overrides since/until"
@@ -73,11 +72,10 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ cenario_id, fields, time_range, since, until, limit, after, before }) => {
+    async ({ account_id, fields, time_range, since, until, limit, after, before }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/activities`;
+        const url = `${FB_GRAPH_URL}/${account_id}/activities`;
 
         const baseParams: Record<string, unknown> = { access_token: token };
         let params = prepareParams(baseParams, { fields, limit, after, before });

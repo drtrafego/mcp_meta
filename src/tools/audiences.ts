@@ -6,8 +6,9 @@ import {
   makeGraphApiCall,
   prepareParams,
   handleApiError,
-  getAccountId
 } from "../services/graph-api.js";
+import { BULK_DELAY_MS, MAX_BULK_ITEMS, sleep } from "../services/rate-limiter.js";
+import { validateBulkSize } from "../services/validators.js";
 
 export function registerAudiencesTools(server: McpServer): void {
   server.registerTool("meta_ads_search_interests", {
@@ -28,16 +29,22 @@ export function registerAudiencesTools(server: McpServer): void {
   });
 
   server.registerTool("meta_ads_bulk_search_interests", {
-    description: "Search for multiple interest keywords at once.",
+    description: `Search for multiple interest keywords at once. Maximum ${MAX_BULK_ITEMS} keywords per call.`,
     inputSchema: z.object({
-      queries: z.array(z.string()).describe("Array of keywords")
+      queries: z.array(z.string()).max(MAX_BULK_ITEMS).describe("Array of keywords")
     })
   }, async (params) => {
     try {
+      const bulkError = validateBulkSize(params.queries, MAX_BULK_ITEMS, "queries");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
       const token = getAccessToken();
       const url = `${FB_GRAPH_URL}/search`;
       const results: any[] = [];
-      for (const query of params.queries) {
+      for (let i = 0; i < params.queries.length; i++) {
+        const query = params.queries[i];
         try {
           const queryParams = prepareParams({ access_token: token, type: 'adinterest', q: query }, {});
           const data = await makeGraphApiCall(url, queryParams);
@@ -45,6 +52,7 @@ export function registerAudiencesTools(server: McpServer): void {
         } catch (e: any) {
           results.push({ query, error: e?.response?.data || e.message });
         }
+        if (i < params.queries.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err) {
@@ -97,13 +105,13 @@ export function registerAudiencesTools(server: McpServer): void {
   server.registerTool("meta_ads_estimate_audience_size", {
     description: "Estimate the audience size for a given targeting configuration.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       optimization_goal: z.string().default("IMPRESSIONS"),
       targeting_spec: z.record(z.any()).describe("The complete targeting object you plan to use")
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const actId = params.account_id;
       const token = getAccessToken();
       const url = `${FB_GRAPH_URL}/${actId}/delivery_estimate`;
       const queryParams = prepareParams({
@@ -138,12 +146,12 @@ export function registerAudiencesTools(server: McpServer): void {
   server.registerTool("meta_ads_get_custom_audiences", {
     description: "Retrieve native or imported Custom Audiences from an Ad Account.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       fields: z.array(z.string()).default(["id", "name", "description", "approximate_count_upper_bound", "approximate_count_lower_bound"])
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const actId = params.account_id;
       const token = getAccessToken();
       const url = `${FB_GRAPH_URL}/${actId}/customaudiences`;
       const queryParams: Record<string, any> = { access_token: token };

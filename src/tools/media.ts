@@ -7,12 +7,12 @@ import {
   makeGraphApiPostCall,
   prepareParams,
   handleApiError,
-  getAccountId
 } from "../services/graph-api.js";
 import { PaginationSchema } from "../schemas/common.js";
-import { getCenario } from "../cenarios.js";
 import FormData from "form-data";
 import axios from "axios";
+import { BULK_DELAY_MS, MAX_BULK_ITEMS, sleep } from "../services/rate-limiter.js";
+import { validateBulkSize } from "../services/validators.js";
 
 export function registerMediaTools(server: McpServer): void {
   server.registerTool(
@@ -24,7 +24,7 @@ export function registerMediaTools(server: McpServer): void {
 Useful for auditing image assets, finding images by hash or name, and checking image dimensions and status.
 
 Args:
-  - cenario_id (string): ID do cenário/cliente, e.g., 'drtrafego_esp'
+  - account_id (string): Ad account ID, e.g. 'act_663136558021878'
   - fields (string[]): Fields to retrieve. Available: id, account_id, created_time, creatives, hash, height, is_associated_creatives_in_adgroups, name, original_height, original_width, permalink_url, status, updated_time, url, url_128, width
   - hashes (string[]): Filter by specific image hashes
   - name (string): Filter images by name (partial match)
@@ -43,9 +43,9 @@ Examples:
   - Use when: "Show images wider than 1000px"`,
       inputSchema: z
         .object({
-          cenario_id: z
+          account_id: z
             .string()
-            .describe("ID do cenário/cliente, e.g., 'drtrafego_esp'"),
+            .describe("Ad account ID, e.g. 'act_663136558021878'"),
           fields: z
             .array(z.string())
             .optional()
@@ -81,11 +81,10 @@ Examples:
         openWorldHint: true,
       },
     },
-    async ({ cenario_id, fields, hashes, name, minwidth, minheight, limit, after, before }) => {
+    async ({ account_id, fields, hashes, name, minwidth, minheight, limit, after, before }) => {
       try {
-        const act_id = getCenario(cenario_id as string).account_id;
         const token = getAccessToken();
-        const url = `${FB_GRAPH_URL}/${act_id}/adimages`;
+        const url = `${FB_GRAPH_URL}/${account_id}/adimages`;
 
         const opts: Record<string, unknown> = { limit, after, before };
         if (fields && fields.length > 0) opts.fields = fields.join(",");
@@ -202,13 +201,13 @@ Examples:
   server.registerTool("meta_ads_upload_ad_image", {
     description: "Upload an ad image from a public URL to the ad account.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       url: z.string().url().describe("Public URL of the image to upload"),
       name: z.string().optional().describe("Optional name for the image in the ad account")
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const actId = params.account_id;
       const token = getAccessToken();
       
       const imageResponse = await axios.get(params.url, { responseType: 'arraybuffer' });
@@ -236,14 +235,14 @@ Examples:
   server.registerTool("meta_ads_upload_ad_video", {
     description: "Upload an ad video from a public URL. Can handle large files directly via Meta backend download.",
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       file_url: z.string().url().describe("Public URL of the video to upload"),
       title: z.string().optional(),
       description: z.string().optional()
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const actId = params.account_id;
       const token = getAccessToken();
       const payload: Record<string, any> = {
         access_token: token,
@@ -260,21 +259,27 @@ Examples:
   });
 
   server.registerTool("meta_ads_bulk_upload_ad_images", {
-    description: "Upload multiple ad images via public URLs.",
+    description: `Upload multiple ad images via public URLs. Maximum ${MAX_BULK_ITEMS} images per call.`,
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       images: z.array(z.object({
         url: z.string().url(),
-        name: z.string().optional()
-      }))
+        name: z.string().max(100).optional().describe("Image name (max 100 chars, must include extension)")
+      })).max(MAX_BULK_ITEMS)
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const bulkError = validateBulkSize(params.images.map((_, i) => String(i)), MAX_BULK_ITEMS, "images");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
+      const actId = params.account_id;
       const token = getAccessToken();
       const results: any[] = [];
-      
-      for (const image of params.images) {
+
+      for (let i = 0; i < params.images.length; i++) {
+        const image = params.images[i];
         try {
           const imageResponse = await axios.get(image.url, { responseType: 'arraybuffer' });
           const buffer = Buffer.from(imageResponse.data, 'binary');
@@ -288,6 +293,7 @@ Examples:
         } catch (e: any) {
           results.push({ url: image.url, status: "error", error: e?.response?.data || e.message });
         }
+        if (i < params.images.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err: any) {
@@ -296,22 +302,28 @@ Examples:
   });
 
   server.registerTool("meta_ads_bulk_upload_ad_videos", {
-    description: "Upload multiple ad videos via public URLs.",
+    description: `Upload multiple ad videos via public URLs. Maximum ${MAX_BULK_ITEMS} videos per call.`,
     inputSchema: z.object({
-      cenario_id: z.string().describe("ID do cenário/cliente, ex: drtrafego_esp"),
+      account_id: z.string().describe("Ad account ID, e.g. 'act_663136558021878'"),
       videos: z.array(z.object({
         file_url: z.string().url(),
         title: z.string().optional(),
         description: z.string().optional()
-      }))
+      })).max(MAX_BULK_ITEMS)
     })
   }, async (params) => {
     try {
-      const actId = getAccountId(params.cenario_id);
+      const bulkError = validateBulkSize(params.videos.map((_, i) => String(i)), MAX_BULK_ITEMS, "videos");
+      if (bulkError) {
+        return { content: [{ type: "text", text: `Validation Error: ${bulkError}` }] };
+      }
+
+      const actId = params.account_id;
       const token = getAccessToken();
       const results: any[] = [];
-      
-      for (const video of params.videos) {
+
+      for (let i = 0; i < params.videos.length; i++) {
+        const video = params.videos[i];
         try {
           const payload: Record<string, any> = { access_token: token, file_url: video.file_url };
           if (video.title) payload.title = video.title;
@@ -321,6 +333,7 @@ Examples:
         } catch (e: any) {
           results.push({ url: video.file_url, status: "error", error: e?.response?.data || e.message });
         }
+        if (i < params.videos.length - 1) await sleep(BULK_DELAY_MS);
       }
       return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
     } catch (err: any) {
